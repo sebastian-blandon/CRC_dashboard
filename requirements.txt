@@ -4,3 +4,4 @@ numpy
 pathlib
 plotly
 statsmodels
+openpyxl
