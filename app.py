@@ -105,6 +105,21 @@ def _hex_to_rgb_tuple(hexcolor: str) -> tuple[int, int, int]:
     return (80, 80, 80)
 
 
+def _hex_to_rgb_tuple(hexcolor: str) -> Tuple[int, int, int]:
+    if isinstance(hexcolor, str) and hexcolor.startswith("#") and len(hexcolor) == 7:
+        return tuple(int(hexcolor[i:i+2], 16) for i in (1, 3, 5))
+    return (80, 80, 80)
+
+def _idc_en_anio(df_depto: pd.DataFrame, anio: int) -> float:
+    """Devuelve IDC del año pedido; prioriza hist si existe, si no usa forecast. NaN si no hay."""
+    fila = df_depto[df_depto["Año"].eq(anio)]
+    if fila.empty:
+        return np.nan
+    # si en ese año hay ambos tipos, prioriza hist
+    if (fila["Tipo"] == "hist").any():
+        return float(fila.loc[fila["Tipo"] == "hist", "IDC"].iloc[0])
+    return float(fila["IDC"].iloc[0])
+
 def build_idc_figure(tmp: pd.DataFrame, prom: pd.DataFrame, dptos_sel: List[str]) -> go.Figure:
     """
     Construye la figura IDC mostrando sólo `dptos_sel` y el promedio nacional.
@@ -237,6 +252,8 @@ def build_idc_figure(tmp: pd.DataFrame, prom: pd.DataFrame, dptos_sel: List[str]
         yaxis_title="IDC",
         legend_title="Series",
         hovermode="x unified",
+        hoverdistance=50,
+        hoverlabel=dict(namelength=-1),
         template="plotly_white",
         margin=dict(l=10, r=10, t=50, b=10),
         height=420,
@@ -252,7 +269,7 @@ with left:
     fig_plot = build_idc_figure(tmp, prom, departamentos_pares)
 
     # Orden cronológico en el eje X (numérico)
-    st.plotly_chart(fig_plot, use_container_width=True)
+    st.plotly_chart(fig_plot, width='stretch')
 
     # --------- E: Lista dinámica ----------
     st.markdown("### Departamentos pares de Risaralda")
