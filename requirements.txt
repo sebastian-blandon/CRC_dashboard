@@ -5,3 +5,4 @@ pathlib
 plotly
 statsmodels
 openpyxl
+sklearn
