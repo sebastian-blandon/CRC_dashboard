@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import List
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.forecasting import forecast_por_departamento
+from src.forecasting import forecast_por_departamento, guardar_pronosticos_en_excel, forecast_one_series
 
 
 # ========================
@@ -49,17 +50,37 @@ st.markdown("---")
 # ========================
 # Carga de datos
 # ========================
-ruta_excel = (
-    "https://docs.google.com/spreadsheets/d/e/"
-    "2PACX-1vToapNGBE4m3q7hFtf3NHJdREeYIUtnIxHUTpdN_gykbClhZFDonm1ZG8n4jm85ag/"
-    "pub?output=xlsx"
-)
+# ruta_excel = (
+#     "https://docs.google.com/spreadsheets/d/e/"
+#     "2PACX-1vToapNGBE4m3q7hFtf3NHJdREeYIUtnIxHUTpdN_gykbClhZFDonm1ZG8n4jm85ag/"
+#     "pub?output=xlsx"
+# )
+
+ruta_excel = Path("data") / "Base_IDC_web_2024-2_dashboard.xlsx"
 hojas = pd.read_excel(ruta_excel, sheet_name=None)
+
 
 df_listado_indicadores = hojas["Listado_indicadores"]
 df_IDC = hojas["Valores_IDC"]
 df_indicadores_normalizados = hojas["Valores_Indicadores_Normalizado"]
 df_analisis_sensibilidad = hojas["Sensibilidad"]
+
+
+if "Pronostico_IDC" in hojas:
+    # 1. YA EXISTE → lo usamos directamente (no calculamos nada)
+    out_df = hojas["Pronostico_IDC"].copy()
+    modelos = {}   # Los modelos no se usan en la app, así que no hace falta guardarlos
+
+else:
+    # 2. NO EXISTE → calculamos y guardamos
+    out_df, modelos = forecast_por_departamento(df_IDC, horizonte=2)
+
+    guardar_pronosticos_en_excel(
+        out_df=out_df,
+        ruta_excel=ruta_excel,
+        sheet_name="Pronostico_IDC",
+    )
+
 del hojas, ruta_excel
 
 # ========================
@@ -82,11 +103,67 @@ tmp = (
 tmp["Año"] = tmp["Año"].astype(int)
 
 # Promedio nacional (sobre TODOS los departamentos)
-prom = (
-    tmp.groupby(["Año", "Tipo"], as_index=False)["IDC"]
+# prom = (
+#     tmp.groupby(["Año", "Tipo"], as_index=False)["IDC"]
+#     .mean()
+#     .rename(columns={"IDC": "IDC_prom"})
+# )
+
+# ========================
+# Serie nacional (histórica) y forecast ETS con IC95
+# ========================
+
+# Usamos sólo datos históricos para construir la serie nacional
+tmp_hist_nac = out_df[out_df["Tipo"] == "hist"].copy()
+
+serie_nac = (
+    tmp_hist_nac
+    .groupby("Año", as_index=False)["IDC"]
     .mean()
-    .rename(columns={"IDC": "IDC_prom"})
+    .sort_values("Año")
 )
+
+# Serie anual con índice de fin de año (igual que en forecasting.py)
+idx_nac = pd.to_datetime(serie_nac["Año"].astype(int).astype(str) + "-12-31")
+s_nac = pd.Series(serie_nac["IDC"].values, index=idx_nac).asfreq("YE-DEC")
+
+# Horizonte igual al de los deptos (2 años)
+fh_nac = 2
+yhat_nac, lo_nac, hi_nac, info_nac = forecast_one_series(s_nac, fh=fh_nac)
+
+# Construimos DataFrame con hist + forecast nacional
+reg_prom = []
+
+# histórico
+for t, val in s_nac.items():
+    reg_prom.append(
+        {
+            "Año": t.year,
+            "Tipo": "hist",
+            "IDC_prom": float(val) if pd.notna(val) else np.nan,
+            "Lo95_prom": np.nan,
+            "Hi95_prom": np.nan,
+        }
+    )
+
+# forecast
+if len(yhat_nac) > 0:
+    last_year_nac = s_nac.index[-1].year
+    future_years_nac = [last_year_nac + i for i in range(1, len(yhat_nac) + 1)]
+    for i, ypred in enumerate(yhat_nac):
+        reg_prom.append(
+            {
+                "Año": future_years_nac[i],
+                "Tipo": "forecast",
+                "IDC_prom": float(ypred),
+                "Lo95_prom": float(lo_nac[i]) if pd.notna(lo_nac[i]) else np.nan,
+                "Hi95_prom": float(hi_nac[i]) if pd.notna(hi_nac[i]) else np.nan,
+            }
+        )
+
+prom = pd.DataFrame(reg_prom)
+
+
 
 # Lista de interés (puede venir de otra parte; si no, dejamos una por defecto)
 try:
@@ -209,6 +286,51 @@ def build_idc_figure(tmp: pd.DataFrame, prom: pd.DataFrame, dptos_sel: List[str]
                 )
             )
 
+    # --- Bandas IC95 del promedio nacional (forecast) ---
+    fc_prom = (
+        prom[
+            (prom["Tipo"] == "forecast")
+            & prom["Lo95_prom"].notna()
+            & prom["Hi95_prom"].notna()
+        ]
+        .sort_values("Año")
+    )
+
+    if not fc_prom.empty:
+        # Polígono relleno
+        fig.add_trace(
+            go.Scatter(
+                x=list(fc_prom["Año"]) + list(fc_prom["Año"][::-1]),
+                y=list(fc_prom["Hi95_prom"]) + list(fc_prom["Lo95_prom"][::-1]),
+                fill="toself",
+                fillcolor="rgba(0,0,0,0.10)",
+                line=dict(width=0),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+        # Bordes punteados
+        fig.add_trace(
+            go.Scatter(
+                x=fc_prom["Año"],
+                y=fc_prom["Hi95_prom"],
+                mode="lines",
+                line=dict(color="black", width=1, dash="dot"),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=fc_prom["Año"],
+                y=fc_prom["Lo95_prom"],
+                mode="lines",
+                line=dict(color="black", width=1, dash="dot"),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
     # --- Promedio nacional continuo (una sola serie) ---
     prom_w = prom.pivot(index="Año", columns="Tipo", values="IDC_prom").sort_index()
     prom_w["IDC_line"] = np.where(prom_w.get("hist").notna(), prom_w["hist"], prom_w.get("forecast"))
@@ -247,7 +369,7 @@ def build_idc_figure(tmp: pd.DataFrame, prom: pd.DataFrame, dptos_sel: List[str]
 
     # --- Layout ---
     fig.update_layout(
-        title="Evolución y pronóstico del IDC",
+        title="",
         xaxis_title="Año",
         yaxis_title="IDC",
         legend_title="Series",

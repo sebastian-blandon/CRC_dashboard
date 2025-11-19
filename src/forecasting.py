@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.holtwinters.results import HoltWintersResults
+from pathlib import Path
 
 # ------------------------------
 # Config
@@ -43,11 +44,27 @@ def _fill_gaps_annual(s: pd.Series, method: str = "interpolate") -> pd.Series:
 def _naive_forecast(last_value: float, fh: int) -> np.ndarray:
     return np.repeat(last_value, fh)
 
+# def _calc_pi(point_fcst: np.ndarray, resid_std: float) -> Tuple[np.ndarray, np.ndarray]:
+#     if np.isnan(resid_std) or resid_std <= 0:
+#         return np.full_like(point_fcst, np.nan), np.full_like(point_fcst, np.nan)
+#     lo = point_fcst - Z_95 * resid_std
+#     hi = point_fcst + Z_95 * resid_std
+#     return lo, hi
+
 def _calc_pi(point_fcst: np.ndarray, resid_std: float) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Intervalos con varianza que crece en el horizonte:
+      Var(e_h) ~ h * resid_std^2  =>  Std(e_h) ~ sqrt(h) * resid_std
+    """
     if np.isnan(resid_std) or resid_std <= 0:
         return np.full_like(point_fcst, np.nan), np.full_like(point_fcst, np.nan)
-    lo = point_fcst - Z_95 * resid_std
-    hi = point_fcst + Z_95 * resid_std
+
+    # h = 1, 2, ..., fh
+    h = np.arange(1, len(point_fcst) + 1, dtype=float)
+    half_width = Z_95 * resid_std * np.sqrt(h)  # ancho crece con h
+
+    lo = point_fcst - half_width
+    hi = point_fcst + half_width
     return lo, hi
 
 # ------------------------------
@@ -184,6 +201,32 @@ def forecast_por_departamento(
     # Orden típico: por Departamento, luego Año
     out = out.sort_values([dept_col, "Año"], kind="mergesort").reset_index(drop=True)
     return out, modelos
+
+def guardar_pronosticos_en_excel(
+    out_df: pd.DataFrame,
+    ruta_excel: str | Path,
+    sheet_name: str = "Pronostico_IDC",
+) -> None:
+    ruta_excel = Path(ruta_excel)
+
+    try:
+        # Si el archivo existe, actualizamos y reemplazamos sólo esa hoja
+        with pd.ExcelWriter(
+            ruta_excel,
+            engine="openpyxl",
+            mode="a",
+            if_sheet_exists="replace",
+        ) as writer:
+            out_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    except FileNotFoundError:
+        # Si no existe, creamos el archivo
+        with pd.ExcelWriter(
+            ruta_excel,
+            engine="openpyxl",
+            mode="w",
+        ) as writer:
+            out_df.to_excel(writer, sheet_name=sheet_name, index=False)
 
 # ------------------------------
 # Ejecución (ejemplo)
