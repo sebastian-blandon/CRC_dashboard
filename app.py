@@ -8,8 +8,7 @@ IDC Dashboard (Streamlit)
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -21,6 +20,7 @@ from src.forecasting import forecast_por_departamento, guardar_pronosticos_en_ex
 from src.scenary_simulator import calcular_variable
 from src.clustering import render_clustering
 import base64
+import math
 
 
 # ========================
@@ -126,7 +126,7 @@ del hojas, ruta_excel
 
 
 
-tab_idc, tab_clustering, tab_simulador = st.tabs(["IDC", "Clustering", "Simulador"])
+tab_idc, tab_clustering, tab_simulador, tab_info = st.tabs(["IDC", "Clustering", "Simulador", "Información"])
 
 
 # ========================
@@ -258,30 +258,76 @@ with tab_idc:
     def build_idc_figure(tmp: pd.DataFrame, prom: pd.DataFrame, dptos_sel: List[str]) -> go.Figure:
         """
         Construye la figura IDC mostrando sólo `dptos_sel` y el promedio nacional.
-        - Línea continua por dpto (hist+forecast) + capa punteada en forecast.
-        - Promedio nacional continuo + capa punteada en forecast.
-        - Bandas IC95 con baja opacidad y borde punteado.
+        - Histórico: línea continua.
+        - Forecast: sólo línea punteada.
+        - Conector punteado entre último histórico y primer forecast.
+        - Bandas IC95 en forecast extendidas desde el último histórico.
+        - Hover unificado ordenado descendentemente por IDC para cada año,
+        con el color de cada serie.
         """
         fig = go.Figure()
 
         # Paleta de alto contraste
         palette = px.colors.qualitative.D3 + px.colors.qualitative.Bold + px.colors.qualitative.Dark24
 
-        # --- Departamentos filtrados ---
+        # Mapa nombre de serie -> color
+        color_map: dict[str, str] = {}
+
+        # ============================
+        # 1. Departamentos filtrados
+        # ============================
         deptos_validos = [d for d in dptos_sel if d in tmp["Departamento"].unique()]
+
         for i, dept in enumerate(deptos_validos):
             color = palette[i % len(palette)]
-            r, g, b = _hex_to_rgb_tuple(color)
-            sub = tmp.loc[tmp["Departamento"] == dept].sort_values("Año")
+            color_map[dept] = color
 
-            # --- Bandas IC95 (debajo) ---
-            fc = sub[sub["Tipo"] == "forecast"]
-            if not fc.empty and fc["Lo95"].notna().all() and fc["Hi95"].notna().all():
-                # polígono relleno
+            r, g, b = _hex_to_rgb_tuple(color)
+
+            sub = tmp.loc[tmp["Departamento"] == dept].sort_values("Año")
+            sub_hist = sub[sub["Tipo"] == "hist"]
+            sub_fc = sub[sub["Tipo"] == "forecast"]
+
+            # Valores para conectar hist -> forecast
+            last_hist_year = None
+            last_hist_idc = None
+            first_fc_year = None
+            first_fc_idc = None
+
+            if not sub_hist.empty:
+                last_row_hist = sub_hist.sort_values("Año").iloc[-1]
+                last_hist_year = int(last_row_hist["Año"])
+                last_hist_idc = float(last_row_hist["IDC"])
+
+            if not sub_fc.empty:
+                first_row_fc = sub_fc.sort_values("Año").iloc[0]
+                first_fc_year = int(first_row_fc["Año"])
+                first_fc_idc = float(first_row_fc["IDC"])
+
+            # --- Bandas IC95 (forecast) ---
+            fc = sub_fc
+            if (
+                not fc.empty
+                and fc["Lo95"].notna().all()
+                and fc["Hi95"].notna().all()
+            ):
+                # Extendemos la banda desde el último histórico, usando IDC_hist como "punto" inicial
+                x_hi = list(fc["Año"])
+                y_hi = list(fc["Hi95"])
+                x_lo = list(fc["Año"])
+                y_lo = list(fc["Lo95"])
+
+                if last_hist_year is not None and last_hist_idc is not None:
+                    x_poly = [last_hist_year] + x_hi + x_lo[::-1] + [last_hist_year]
+                    y_poly = [last_hist_idc] + y_hi + y_lo[::-1] + [last_hist_idc]
+                else:
+                    x_poly = x_hi + x_lo[::-1]
+                    y_poly = y_hi + y_lo[::-1]
+
                 fig.add_trace(
                     go.Scatter(
-                        x=list(fc["Año"]) + list(fc["Año"][::-1]),
-                        y=list(fc["Hi95"]) + list(fc["Lo95"][::-1]),
+                        x=x_poly,
+                        y=y_poly,
                         fill="toself",
                         fillcolor=f"rgba({r},{g},{b},0.12)",
                         line=dict(width=0),
@@ -290,7 +336,8 @@ with tab_idc:
                         showlegend=False,
                     )
                 )
-                # bordes punteados para distinguir bandas solapadas
+
+                # Bordes punteados sólo sobre los años de forecast
                 fig.add_trace(
                     go.Scatter(
                         x=fc["Año"],
@@ -314,37 +361,59 @@ with tab_idc:
                     )
                 )
 
-            # --- Línea continua (hist + forecast) ---
-            fig.add_trace(
-                go.Scatter(
-                    x=sub["Año"],
-                    y=sub["IDC"],
-                    mode="lines+markers",
-                    name=dept,
-                    legendgroup=dept,
-                    marker=dict(symbol="circle", size=7),
-                    line=dict(color=color, width=2.5),
-                    hovertemplate=f"<b>{dept}</b><br>Año=%{{x}}<br>IDC=%{{y:.3f}}<extra></extra>",
-                    showlegend=True,
-                )
-            )
-
-            # --- Capa punteada (sólo sobre forecast) ---
-            if not fc.empty:
+            # --- Línea continua SOLO histórico ---
+            if not sub_hist.empty:
                 fig.add_trace(
                     go.Scatter(
-                        x=fc["Año"],
-                        y=fc["IDC"],
+                        x=sub_hist["Año"],
+                        y=sub_hist["IDC"],
                         mode="lines+markers",
+                        name=dept,
+                        legendgroup=dept,
+                        marker=dict(symbol="circle", size=7),
+                        line=dict(color=color, width=2.5),
+                        hoverinfo="skip",  # hover centralizado
+                        showlegend=True,
+                    )
+                )
+
+            # --- Línea punteada SOLO forecast ---
+            if not sub_fc.empty:
+                serie_fc_name = f"{dept} (forecast)"
+                color_map[serie_fc_name] = color
+
+                # forecast propiamente dicho
+                fig.add_trace(
+                    go.Scatter(
+                        x=sub_fc["Año"],
+                        y=sub_fc["IDC"],
+                        mode="lines+markers",
+                        name=serie_fc_name,
+                        legendgroup=dept,
                         marker=dict(symbol="circle-open", size=8),
                         line=dict(color=color, width=2.5, dash="dash"),
-                        legendgroup=dept,
-                        hovertemplate=f"<b>{dept} (forecast)</b><br>Año=%{{x}}<br>IDC=%{{y:.3f}}<extra></extra>",
+                        hoverinfo="skip",
                         showlegend=False,
                     )
                 )
 
-        # --- Bandas IC95 del promedio nacional (forecast) ---
+                # --- Conector punteado entre último histórico y primer forecast ---
+                if (last_hist_year is not None) and (first_fc_year is not None):
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[last_hist_year, first_fc_year],
+                            y=[last_hist_idc, first_fc_idc],
+                            mode="lines",
+                            line=dict(color=color, width=2.5, dash="dash"),
+                            legendgroup=dept,
+                            hoverinfo="skip",
+                            showlegend=False,
+                        )
+                    )
+
+        # ===========================================
+        # 2. Bandas IC95 del promedio nacional (forecast)
+        # ===========================================
         fc_prom = (
             prom[
                 (prom["Tipo"] == "forecast")
@@ -354,12 +423,35 @@ with tab_idc:
             .sort_values("Año")
         )
 
+        prom_hist = prom[
+            (prom["Tipo"] == "hist") & prom["IDC_prom"].notna()
+        ].sort_values("Año")
+
+        last_hist_year_prom = None
+        last_hist_idc_prom = None
+        if not prom_hist.empty:
+            last_row_ph = prom_hist.iloc[-1]
+            last_hist_year_prom = int(last_row_ph["Año"])
+            last_hist_idc_prom = float(last_row_ph["IDC_prom"])
+
         if not fc_prom.empty:
-            # Polígono relleno
+            # Polígono relleno extendido desde el último histórico
+            x_hi_p = list(fc_prom["Año"])
+            y_hi_p = list(fc_prom["Hi95_prom"])
+            x_lo_p = list(fc_prom["Año"])
+            y_lo_p = list(fc_prom["Lo95_prom"])
+
+            if last_hist_year_prom is not None and last_hist_idc_prom is not None:
+                x_poly_p = [last_hist_year_prom] + x_hi_p + x_lo_p[::-1] + [last_hist_year_prom]
+                y_poly_p = [last_hist_idc_prom] + y_hi_p + y_lo_p[::-1] + [last_hist_idc_prom]
+            else:
+                x_poly_p = x_hi_p + x_lo_p[::-1]
+                y_poly_p = y_hi_p + y_lo_p[::-1]
+
             fig.add_trace(
                 go.Scatter(
-                    x=list(fc_prom["Año"]) + list(fc_prom["Año"][::-1]),
-                    y=list(fc_prom["Hi95_prom"]) + list(fc_prom["Lo95_prom"][::-1]),
+                    x=x_poly_p,
+                    y=y_poly_p,
                     fill="toself",
                     fillcolor="rgba(0,0,0,0.10)",
                     line=dict(width=0),
@@ -367,7 +459,7 @@ with tab_idc:
                     showlegend=False,
                 )
             )
-            # Bordes punteados
+            # Bordes punteados sólo sobre forecast
             fig.add_trace(
                 go.Scatter(
                     x=fc_prom["Año"],
@@ -389,43 +481,64 @@ with tab_idc:
                 )
             )
 
-        # --- Promedio nacional continuo (una sola serie) ---
-        prom_w = prom.pivot(index="Año", columns="Tipo", values="IDC_prom").sort_index()
-        prom_w["IDC_line"] = np.where(prom_w.get("hist").notna(), prom_w["hist"], prom_w.get("forecast"))
-        anos_fc = prom.loc[prom["Tipo"] == "forecast", "Año"].sort_values()
-
-        # Traza continua negra (sin cortes)
-        fig.add_trace(
-            go.Scatter(
-                x=prom_w.index.astype(int),
-                y=prom_w["IDC_line"],
-                mode="lines+markers",
-                name="Promedio IDC",
-                legendgroup="Promedio",
-                marker=dict(symbol="circle", size=8),
-                line=dict(color="black", width=3.2),
-                hovertemplate="<b>Promedio</b><br>Año=%{x}<br>IDC=%{y:.3f}<extra></extra>",
-                showlegend=True,
-            )
-        )
-        # Capa punteada sobre los años forecast
-        if len(anos_fc) > 0:
-            y_fc = prom_w.loc[prom_w.index.isin(anos_fc), "IDC_line"]
+        # ===============================
+        # 3. Promedio nacional (línea)
+        # ===============================
+        if not prom_hist.empty:
+            color_map["Promedio IDC"] = "black"
             fig.add_trace(
                 go.Scatter(
-                    x=anos_fc.astype(int),
-                    y=y_fc,
+                    x=prom_hist["Año"],
+                    y=prom_hist["IDC_prom"],
+                    mode="lines+markers",
+                    name="Promedio IDC",
+                    legendgroup="Promedio",
+                    marker=dict(symbol="circle", size=8),
+                    line=dict(color="black", width=3.2),
+                    hoverinfo="skip",
+                    showlegend=True,
+                )
+            )
+
+        prom_fc = prom[
+            (prom["Tipo"] == "forecast") & prom["IDC_prom"].notna()
+        ].sort_values("Año")
+
+        if not prom_fc.empty:
+            color_map["Promedio IDC (forecast)"] = "black"
+            # forecast propiamente dicho
+            fig.add_trace(
+                go.Scatter(
+                    x=prom_fc["Año"],
+                    y=prom_fc["IDC_prom"],
                     mode="lines+markers",
                     name="Promedio IDC (forecast)",
                     legendgroup="Promedio",
                     marker=dict(symbol="circle-open", size=9),
                     line=dict(color="black", width=3.2, dash="dash"),
-                    hovertemplate="<b>Promedio (forecast)</b><br>Año=%{x}<br>IDC=%{y:.3f}<extra></extra>",
-                    showlegend=True,
+                    hoverinfo="skip",
+                    showlegend=False,
                 )
             )
 
-        # --- Layout ---
+            # conector punteado hist -> forecast
+            if (last_hist_year_prom is not None) and (not prom_fc.empty):
+                first_row_pfc = prom_fc.iloc[0]
+                fig.add_trace(
+                    go.Scatter(
+                        x=[last_hist_year_prom, int(first_row_pfc["Año"])],
+                        y=[last_hist_idc_prom, float(first_row_pfc["IDC_prom"])],
+                        mode="lines",
+                        line=dict(color="black", width=3.2, dash="dash"),
+                        legendgroup="Promedio",
+                        hoverinfo="skip",
+                        showlegend=False,
+                    )
+                )
+
+        # ===============================
+        # 4. Layout básico
+        # ===============================
         fig.update_layout(
             title="",
             xaxis_title="Año",
@@ -438,18 +551,169 @@ with tab_idc:
             margin=dict(l=10, r=10, t=50, b=10),
             height=670,
         )
-        # fig.update_xaxes(type="category")
-        # return fig
         fig.update_xaxes(type="linear", tickmode="linear", dtick=1)
+
+        # ================================================
+        # 5. Hover ordenado por IDC (desc) CON COLORES
+        # ================================================
+
+        base_tmp = tmp[tmp["Departamento"].isin(deptos_validos)][
+            ["Año", "Departamento", "IDC", "Tipo"]
+        ].copy()
+
+        base_prom = prom[["Año", "IDC_prom", "Tipo"]].copy()
+        base_prom.rename(columns={"IDC_prom": "IDC"}, inplace=True)
+        base_prom["Departamento"] = "Promedio IDC"
+
+        base_all = pd.concat([base_tmp, base_prom], ignore_index=True)
+
+        def nombre_serie(row) -> str:
+            dpto = row["Departamento"]
+            tipo = row["Tipo"]
+            if dpto == "Promedio IDC":
+                return "Promedio IDC (forecast)" if tipo == "forecast" else "Promedio IDC"
+            else:
+                return f"{dpto} (forecast)" if tipo == "forecast" else dpto
+
+        base_all["Serie"] = base_all.apply(nombre_serie, axis=1)
+
+        base_all_sorted = base_all.sort_values(["Año", "IDC"], ascending=[True, False])
+
+        def build_block(grp: pd.DataFrame) -> str:
+            filas = []
+            for _, r in grp.iterrows():
+                serie = r["Serie"]
+                val = r["IDC"]
+                color = color_map.get(serie, "black")
+                filas.append(
+                    f'<span style="color:{color};font-weight:bold;">● {serie}</span>: {val:.3f}'
+                )
+            return "<br>".join(filas)
+
+        hover_text_dict = base_all_sorted.groupby("Año").apply(build_block).to_dict()
+
+        anos_unicos = sorted(base_all["Año"].unique())
+        custom_hover = [hover_text_dict.get(a, "") for a in anos_unicos]
+
+        # Traza "fantasma" que centraliza el hover
+        fig.add_trace(
+            go.Scatter(
+                x=anos_unicos,
+                y=[0] * len(anos_unicos),          # valor numérico para que haya hover
+                mode="markers",
+                marker=dict(size=8, opacity=0),    # marcador invisible
+                line=dict(width=0),
+                showlegend=False,
+                name="__hover_central__",
+                customdata=custom_hover,
+                hovertemplate="%{customdata}<extra></extra>",
+                hoverlabel=dict(namelength=-1),
+            )
+)
+
         return fig
 
+    
+def round_down_to_half(x: float) -> float:
+    """Redondea hacia abajo al múltiplo de 0.5 más cercano."""
+    n = math.floor(x)
+    frac = x - n
+    if frac < 0.5:
+        return n
+    else:
+        return n + 0.5
 
-    with left:
-        st.subheader("Evolución y pronóstico del IDC")
-        fig_plot = build_idc_figure(tmp, prom, departamentos_pares2)
+def round_up_to_half(x: float) -> float:
+    """Redondea hacia arriba al múltiplo de 0.5 más cercano."""
+    n = math.floor(x)
+    frac = x - n
+    if frac == 0:
+        return n
+    elif frac < 0.5:
+        return n + 0.5
+    else:
+        return n + 1.0
 
-        # Orden cronológico en el eje X (numérico)
-        st.plotly_chart(fig_plot, width='stretch')
+with left:
+    st.subheader("Evolución y pronóstico del IDC")
+    
+    vista_global = st.toggle(
+        "Usar escala global (0–10)",
+        value=True,
+        help=(
+            "Activa para ver el IDC en la escala completa 0–10. "
+            "Desactiva para hacer zoom automático según los valores mostrados, "
+            "incluyendo los intervalos de confianza del último año pronosticado."
+        )
+    )
+    
+    fig_plot = build_idc_figure(tmp, prom, departamentos_pares2)
+
+    if vista_global:
+        # Escala fija 0–10
+        fig_plot.update_yaxes(range=[0, 10])
+    else:
+        # Zoom: calculamos el rango a partir de lo que realmente se está mostrando
+        base_tmp = tmp[tmp["Departamento"].isin(departamentos_pares2)]
+
+        vals_minmax = []
+
+        # IDC de departamentos pares
+        if not base_tmp.empty:
+            vals_minmax.append(base_tmp["IDC"].min())
+            vals_minmax.append(base_tmp["IDC"].max())
+
+        # IDC del promedio
+        if not prom.empty:
+            vals_minmax.append(prom["IDC_prom"].min())
+            vals_minmax.append(prom["IDC_prom"].max())
+
+        # ---------- límite superior basado en IC del último año forecast ----------
+        y_max_candidates = []
+
+        if not prom.empty:
+            fc_years = prom.loc[prom["Tipo"] == "forecast", "Año"]
+            if not fc_years.empty:
+                last_fc_year = fc_years.max()
+
+                # Hi95 de departamentos pares en ese año
+                tmp_fc_last = base_tmp[
+                    (base_tmp["Tipo"] == "forecast") &
+                    (base_tmp["Año"] == last_fc_year)
+                ]
+                if "Hi95" in tmp_fc_last.columns:
+                    y_max_candidates.extend(tmp_fc_last["Hi95"].dropna().tolist())
+
+                # Hi95 del promedio en ese año
+                prom_fc_last = prom[
+                    (prom["Tipo"] == "forecast") &
+                    (prom["Año"] == last_fc_year)
+                ]
+                if "Hi95_prom" in prom_fc_last.columns:
+                    y_max_candidates.extend(prom_fc_last["Hi95_prom"].dropna().tolist())
+
+        # ---------- construir y_min / y_max crudos ----------
+        if vals_minmax:
+            raw_min = min(vals_minmax)
+        else:
+            raw_min = 0.0
+
+        if y_max_candidates:
+            raw_max = max(y_max_candidates)
+        elif vals_minmax:
+            raw_max = max(vals_minmax)
+        else:
+            raw_max = 10.0
+
+        # ---------- redondeo a múltiplos de 0.5 ----------
+        y_min = round_down_to_half(raw_min)
+        y_max = round_up_to_half(raw_max)
+
+        # opcional: pequeño margen visual
+        margen = 0.0  # si quieres puedes poner 0.1
+        fig_plot.update_yaxes(range=[y_min - margen, y_max + margen])
+
+    st.plotly_chart(fig_plot, width="stretch")
 
         
 
@@ -560,3 +824,27 @@ with tab_simulador:
     #             resultado = calcular_variable(codigo, valores)
     #             if resultado is not None:
     #                 st.success(f"**Nuevo valor calculado:** {resultado:.4f}")
+
+# ========================
+# Pestaña Información
+# ========================
+with tab_info:
+    st.markdown('''
+    Este prototipo funcional de tablero (dashboard) en nivel TRL3 fue desarrollado por integrantes del Semillero de Investigación en Análisis de Datos (SAND), adscrito al Grupo de Investigación en Análisis de Datos y Sociología Computacional (GIADSc) en el marco del reto 'Asistente digital para el análisis y simulación de indicadores del IDC', de la convocatoria interna 'Convocatoria para financiar propuestas de solución a retos empresariales' de la Vicerrectoría de Investigaciones, Innovación y Extensión de la Universidad Tecnológica de Pereira en alianza con la Comisión Regional de Competitividad de Risaralda (CRC) en el semestre 2025-2. 
+    ''')
+    st.subheader("Equipo de trabajo:")
+    st.markdown('''
+    - **Cristian Camilo Galeano Largo (c.galeano@utp.edu.co):**\n
+    Estudiante de último semestre de Ingeniería Física.\n
+    *Perfil de LinkedIn:* \n
+    - **Kevin Ossa Varela (kevin.ossa@utp.edu.co):**\n
+    Estudiante de último semestre de Ingeniería de Sistemas.\n
+    *Perfil de LinkedIn:* \n
+    - **Ing. Sebastián Blandón Londoño (s.blandon@utp.edu.co):**\n
+    Profesor de la Facultad de Ciencias Empresariales.\n
+    *Perfil de LinkedIn:* https://www.linkedin.com/in/sebastian-blandon/
+    - **P.hD. Julián David Echeverry Correa (jde@utp.edu.co):**\n
+    Profesor de la Facultad de Ingenierías.\n
+    *Perfil de LinkedIn:* https://www.linkedin.com/in/juliandecheverry/
+    ''')
+    st.subheader("**Semillero de Investigación en Análisis de Datos (SAND) | Grupo de Investigación en Análisis de Datos y Sociología Computacional (GIADSc) [2025]**")

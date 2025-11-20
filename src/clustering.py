@@ -173,7 +173,7 @@ def render_clustering(df, df_idc):
     # ====================================
     # 7. Tabla final: Silhouette + IDC
     # ====================================
-    st.markdown("### Departamentos más cercanos a Risaralda (con IDC y Silhouette)")
+    st.markdown("### Departamentos más cercanos a Risaralda")
 
     # df_scores_ordenado = df_scores.sort_values("Distancia_PC1_PC2")
     # df_resultado = df_scores_ordenado[['Departamento','Silhouette','Año']].merge(
@@ -203,9 +203,26 @@ def render_clustering(df, df_idc):
     )
 
     # === 7.4 Mostrar tabla ===
+    # st.dataframe(
+    #     # df_resultado[['Departamento','IDC','Silhouette']].sort_values("IDC", ascending=False).reset_index(drop=True),
+    #     df_resultado[['Departamento','IDC']].sort_values("IDC", ascending=False).reset_index(drop=True),
+    #     width='content'
+    # )
+
+    df_tabla = (
+        df_resultado[['Departamento', 'IDC']]
+        .sort_values("IDC", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    # índice empezando en 1
+    df_tabla.index = df_tabla.index + 1
+    df_tabla.index.name = ""   # opcional: sin título de índice
+
     st.dataframe(
-        df_resultado[['Departamento','IDC','Silhouette']].sort_values("IDC", ascending=False).reset_index(drop=True),
-        width='stretch'
+        df_tabla,
+        width="content"
     )
 
     st.session_state['departamentos_pares'] = df_resultado['Departamento'].tolist()
+    
