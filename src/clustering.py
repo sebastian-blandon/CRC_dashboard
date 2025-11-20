@@ -210,7 +210,7 @@ def render_clustering(df, df_idc):
     # )
 
     df_tabla = (
-        df_resultado[['Departamento', 'IDC']]
+        df_resultado[['Departamento', 'IDC', 'Silhouette']]
         .sort_values("IDC", ascending=False)
         .reset_index(drop=True)
     )
