@@ -4,7 +4,7 @@ import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans, AgglomerativeClustering, SpectralClustering
 from sklearn.mixture import GaussianMixture
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, silhouette_samples
 import plotly.express as px
 import os
 
@@ -51,7 +51,7 @@ def render_clustering(df, df_idc):
     var_pc1 = pca.explained_variance_ratio_[0] * 100
     var_pc2 = pca.explained_variance_ratio_[1] * 100
 
-    st.markdown(f"**Varianza explicada:** PC1 = {var_pc1:.2f}% | PC2 = {var_pc2:.2f}%")
+    st.markdown(f"*Varianza explicada:* PC1 = {var_pc1:.2f}% | PC2 = {var_pc2:.2f}%")
 
     # ====================================
     # 3. Distancia a Risaralda
@@ -134,10 +134,20 @@ def render_clustering(df, df_idc):
         else:
             model = GaussianMixture(n_components=best_k, random_state=42)
 
-        df_scores['Cluster'] = model.fit_predict(X_pca2)
+        # ---------- 1. Asignar cluster al modelo elegido ----------
+        if best_model == 'GaussianMixture':
+            df_scores['Cluster'] = model.fit(X_pca2).predict(X_pca2)
+        else:
+            df_scores['Cluster'] = model.fit_predict(X_pca2)
+
+        # ---------- 2. Silhouette INDIVIDUAL (por fila) ----------
+        df_scores['Silhouette'] = silhouette_samples(X_pca2, df_scores['Cluster'])
+
+        # ---------- 3. Año y metadatos para el csv --------------
+        df_scores['Año'] = anio_seleccionado
         df_scores['Modelo'] = best_model
         df_scores['K'] = best_k
-        df_scores['Silhouette'] = best_sil
+        df_scores['Silhouette_global'] = best_sil
 
         df_scores.to_csv(save_path, index=False)
         st.success(f"Modelo guardado en {save_path}")
@@ -173,7 +183,7 @@ def render_clustering(df, df_idc):
     # ====================================
     # 7. Tabla final: Silhouette + IDC
     # ====================================
-    st.markdown("### Departamentos más cercanos a Risaralda")
+    st.markdown("### Departamentos más cercanos a Risaralda (con IDC y Silhouette)")
 
     # df_scores_ordenado = df_scores.sort_values("Distancia_PC1_PC2")
     # df_resultado = df_scores_ordenado[['Departamento','Silhouette','Año']].merge(
@@ -203,12 +213,6 @@ def render_clustering(df, df_idc):
     )
 
     # === 7.4 Mostrar tabla ===
-    # st.dataframe(
-    #     # df_resultado[['Departamento','IDC','Silhouette']].sort_values("IDC", ascending=False).reset_index(drop=True),
-    #     df_resultado[['Departamento','IDC']].sort_values("IDC", ascending=False).reset_index(drop=True),
-    #     width='content'
-    # )
-
     df_tabla = (
         df_resultado[['Departamento', 'IDC', 'Silhouette']]
         .sort_values("IDC", ascending=False)
@@ -225,4 +229,3 @@ def render_clustering(df, df_idc):
     )
 
     st.session_state['departamentos_pares'] = df_resultado['Departamento'].tolist()
-    

@@ -1,5 +1,14 @@
 import streamlit as st
 
+def calcular_idc(df, departamento):
+    sub = df[df["Departamento"] == departamento]
+
+    # columnas numéricas excepto Departamento y Año
+    indicadores = [c for c in df.columns if c not in ["Departamento", "Año"]]
+
+    # Promedio de todos los indicadores
+    return sub[indicadores].mean(axis=1).iloc[0]
+
 def calcular_variable(codigo, valores):
     """Calcula el valor de una variable según su fórmula y los valores independientes."""
     try:

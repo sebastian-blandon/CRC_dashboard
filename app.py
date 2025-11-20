@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.forecasting import forecast_por_departamento, guardar_pronosticos_en_excel, forecast_one_series
-from src.scenary_simulator import calcular_variable
+from src.scenary_simulator import calcular_variable, calcular_idc
 from src.clustering import render_clustering
 import base64
 import math
@@ -794,6 +794,15 @@ with tab_simulador:
         with st.expander(f"{nombre} ({codigo})", expanded=False):
             st.caption("Introduce nuevos valores y luego presiona el botón para actualizar el cálculo.")
 
+            try:
+                valor_inicial = df_indicadores_normalizados.loc[
+                    df_indicadores_normalizados["Indicador"] == codigo, "Valor"
+                ].values[0]
+            except:
+                valor_inicial = calcular_variable(codigo, valores_iniciales[codigo])
+
+            st.info(f"**Valor actual del indicador:** {valor_inicial:.4f}")
+
             # Inputs con session_state
             for var, val in valores_vars.items():
                 st.number_input(
@@ -808,6 +817,19 @@ with tab_simulador:
                 resultado = calcular_variable(codigo, valores)
                 if resultado is not None:
                     st.success(f"**Nuevo valor calculado:** {resultado:.4f}")
+
+                    df_mod = df_indicadores_normalizados.copy()
+                    df_mod.loc[df_mod["Departamento"] == "Risaralda", codigo] = resultado
+
+                    idc_actual = calcular_idc(df_indicadores_normalizados, "Risaralda")
+                    idc_nuevo = calcular_idc(df_mod, "Risaralda")
+                    delta = idc_nuevo - idc_actual
+
+                    st.metric(
+                        label="Impacto sobre el IDC de Risaralda",
+                        value=f"{idc_nuevo:.3f}",
+                        delta=f"{delta:+.3f}"
+                    )
 
 
     # for _, row in tabla_final.iterrows():
@@ -836,14 +858,14 @@ with tab_info:
     st.markdown('''
     - **Cristian Camilo Galeano Largo (c.galeano@utp.edu.co):**\n
     Estudiante de último semestre de Ingeniería Física.\n
-    *Perfil de LinkedIn:* \n
+    *Perfil de LinkedIn:* https://www.linkedin.com/in/cristian-camilo-galeano-largo-67ab8b340/\n
     - **Kevin Ossa Varela (kevin.ossa@utp.edu.co):**\n
-    Estudiante de último semestre de Ingeniería de Sistemas.\n
-    *Perfil de LinkedIn:* \n
+    Estudiante de último semestre de Ingeniería de Sistemas y Computación.\n
+    *Perfil de LinkedIn:* https://www.linkedin.com/in/kevin-ossa-varela-886aa7283/\n
     - **Ing. Sebastián Blandón Londoño (s.blandon@utp.edu.co):**\n
     Profesor de la Facultad de Ciencias Empresariales.\n
     *Perfil de LinkedIn:* https://www.linkedin.com/in/sebastian-blandon/
-    - **P.hD. Julián David Echeverry Correa (jde@utp.edu.co):**\n
+    - **Ph.D. Julián David Echeverry Correa (jde@utp.edu.co):**\n
     Profesor de la Facultad de Ingenierías.\n
     *Perfil de LinkedIn:* https://www.linkedin.com/in/juliandecheverry/
     ''')
