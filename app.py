@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 IDC Dashboard (Streamlit)
 - Gráfico con series por departamento (hist+forecast en línea continua)
@@ -101,6 +100,7 @@ df_IDC = hojas["Valores_IDC"]
 df_indicadores_normalizados = hojas["Valores_Indicadores_Normalizado"]
 df_analisis_sensibilidad = hojas["Sensibilidad"]
 df_factores = hojas["Valor_normalizadoAgrupado"]
+df_pilares = hojas["Valor_normalizadoAgrupado_Pil"]
 
 
 if "Pronostico_IDC" in hojas:
@@ -1173,6 +1173,42 @@ FACTORES_PILARES = OrderedDict({
     ],
 })
 
+
+MAPA_PILAR_COL = {
+    "1. Instituciones": "INS",
+    "2. Infraestructura": "INF",
+    "3. Adopción TIC": "TIC",
+    "4. Sostenibilidad ambiental": "AMB",   # uso el texto de FACTORES_PILARES
+    "5. Salud": "SAL",
+    "6. Educación básica y media": "EDU",
+    "7. Educación superior y formación para el trabajo": "EDS",
+    "8. Entorno para los negocios": "NEG",
+    "9. Mercado laboral": "LAB",
+    "10. Sistema financiero": "FIN",
+    "11. Tamaño del mercado": "TAM",
+    "12. Sofisticación y diversificación": "SOF",
+    "13. Innovación": "INN",
+}
+
+PILAR_COL_MAP = {
+    "P1": "INS",
+    "P2": "INF",
+    "P3": "TIC",
+    "P4": "AMB",
+    "P5": "SAL",
+    "P6": "EDU",
+    "P7": "EDS",
+    "P8": "NEG",
+    "P9": "LAB",
+    "P10": "FIN",
+    "P11": "TAM",
+    "P12": "SOF",
+    "P13": "INN",
+}
+
+
+
+
 def chip_promedio(label: str, value: float | None) -> None:
     """
     Renderiza un 'chip' tipo botón con el texto Promedio y el valor.
@@ -1201,8 +1237,68 @@ def chip_promedio(label: str, value: float | None) -> None:
         unsafe_allow_html=True,
     )
 
+ANIO_COL_PILARES = "Año IDC"
+
 with tab_calculadora:
     st.subheader("Calculadora rápida del IDC (0–10)")
+
+    # ---------------------------------
+    # Selección de departamento origen
+    # ---------------------------------
+    dptos_calc = sorted(df_pilares["Departamento"].dropna().unique())
+    if "Risaralda" in dptos_calc:
+        idx_default_calc = dptos_calc.index("Risaralda")
+    else:
+        idx_default_calc = 0
+
+    depto_calc = st.selectbox(
+        "Selecciona el departamento para precargar los valores:",
+        dptos_calc,
+        index=idx_default_calc,
+        key="calc_depto_sel",
+    )
+
+    # ----------------------------------
+    # 2) Precarga de valores por cambio de departamento
+    # ----------------------------------
+    prev_depto = st.session_state.get("calc_depto_prev", None)
+
+    if prev_depto != depto_calc:
+        st.session_state["calc_depto_prev"] = depto_calc
+
+        df_dep_pilares = df_pilares[df_pilares["Departamento"] == depto_calc].copy()
+
+        # Reset de promedios de factores
+        for i, _ in enumerate(FACTORES_PILARES.items(), start=1):
+            st.session_state[f"prom_factor_{i}"] = None
+
+        # Si hay datos para el departamento, tomamos el último año
+        fila_ult = None
+        if not df_dep_pilares.empty and ANIO_COL_PILARES in df_dep_pilares.columns:
+            anio_max = df_dep_pilares[ANIO_COL_PILARES].max()
+            fila_ult = (
+                df_dep_pilares[df_dep_pilares[ANIO_COL_PILARES] == anio_max]
+                .sort_values(ANIO_COL_PILARES)
+                .iloc[0]
+            )
+
+        # Precargar pilares (valor base) y limpiar porcentaje
+        for _, pilares in FACTORES_PILARES.items():
+            for codigo, _nombre_pilar in pilares:
+                key_pilar = f"pilar_{codigo}"
+                key_pct = f"pilar_pct_{codigo}"
+
+                valor_texto = ""
+                if fila_ult is not None:
+                    col_name = PILAR_COL_MAP.get(codigo)
+                    if col_name and col_name in fila_ult.index and pd.notna(fila_ult[col_name]):
+                        valor_texto = str(float(fila_ult[col_name]))
+
+                st.session_state[key_pilar] = valor_texto
+                st.session_state[key_pct] = ""  # 0% por defecto
+
+
+
 
     col_left, col_right = st.columns([2, 1], gap="large")
 
@@ -1222,14 +1318,27 @@ with tab_calculadora:
                 with c1:
                     st.markdown(f"**Factor {i}. {nombre_factor}**")
 
-                # --- Inputs de los pilares (sólo recogen valores) ---
+                # --- Inputs de los pilares (ya vienen precargados en session_state) ---
+                # for codigo, nombre_pilar in pilares:
+                #     st.text_input(
+                #         nombre_pilar,
+                #         placeholder="Ingresa un valor (0–10)",
+                #         key=f"pilar_{codigo}",
+                #     )
                 for codigo, nombre_pilar in pilares:
-                    st.text_input(
-                        nombre_pilar,
-                        placeholder="Ingresa un valor (0–10)",
-                        key=f"pilar_{codigo}",
-                    )
-
+                    col_val, col_pct = st.columns([3, 1])
+                    with col_val:
+                        st.text_input(
+                            nombre_pilar,
+                            placeholder="Ingresa un valor (0–10)",
+                            key=f"pilar_{codigo}",
+                        )
+                    with col_pct:
+                        st.text_input(
+                            "Cambio %",
+                            placeholder="0",
+                            key=f"pilar_pct_{codigo}",
+                        )
                 # Botón que dispara la validación y el cálculo
                 submitted = st.form_submit_button("Calcular promedio del factor")
 
@@ -1241,24 +1350,56 @@ with tab_calculadora:
                     errores_factor: list[str] = []
 
                     for codigo, nombre_pilar in pilares:
-                        txt = str(st.session_state.get(f"pilar_{codigo}", "")).strip()
+                        # txt = str(st.session_state.get(f"pilar_{codigo}", "")).strip()
 
-                        if txt == "":
+                        # if txt == "":
+                        #     errores_factor.append(f"Falta valor en {nombre_pilar}.")
+                        #     continue
+
+                        # try:
+                        #     val = float(txt.replace(",", "."))
+                        #     if not (0.0 <= val <= 10.0):
+                        #         errores_factor.append(
+                        #             f"El valor de {nombre_pilar} debe estar entre 0 y 10."
+                        #         )
+                        #     else:
+                        #         valores_factor.append(val)
+                        # except ValueError:
+                        #     errores_factor.append(
+                        #         f"El valor de {nombre_pilar} debe ser numérico."
+                        #     )
+                        txt_val = str(st.session_state.get(f"pilar_{codigo}", "")).strip()
+                        txt_pct = str(st.session_state.get(f"pilar_pct_{codigo}", "")).strip()
+
+                        if txt_val == "":
                             errores_factor.append(f"Falta valor en {nombre_pilar}.")
                             continue
 
                         try:
-                            val = float(txt.replace(",", "."))
-                            if not (0.0 <= val <= 10.0):
-                                errores_factor.append(
-                                    f"El valor de {nombre_pilar} debe estar entre 0 y 10."
-                                )
-                            else:
-                                valores_factor.append(val)
+                            val_base = float(txt_val.replace(",", "."))
                         except ValueError:
+                            errores_factor.append(f"El valor de {nombre_pilar} debe ser numérico.")
+                            continue
+
+                        if txt_pct == "":
+                            pct = 0.0
+                        else:
+                            try:
+                                pct = float(txt_pct.replace(",", "."))
+                            except ValueError:
+                                errores_factor.append(
+                                    f"El cambio % de {nombre_pilar} debe ser numérico."
+                                )
+                                continue
+
+                        val_ajustado = val_base * (1.0 + pct / 100.0)
+
+                        if not (0.0 <= val_ajustado <= 10.0):
                             errores_factor.append(
-                                f"El valor de {nombre_pilar} debe ser numérico."
+                                f"El valor ajustado de {nombre_pilar} ({val_ajustado:.2f}) debe estar entre 0 y 10."
                             )
+                        else:
+                            valores_factor.append(val_ajustado)
 
                     if errores_factor or len(valores_factor) < len(pilares):
                         prom_factor = None
