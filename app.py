@@ -8,7 +8,8 @@ IDC Dashboard (Streamlit)
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+from collections import OrderedDict
 
 import numpy as np
 import pandas as pd
@@ -17,7 +18,6 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.forecasting import forecast_por_departamento, guardar_pronosticos_en_excel, forecast_one_series
-from src.scenary_simulator import calcular_variable, calcular_idc
 from src.clustering import render_clustering
 import base64
 import math
@@ -100,6 +100,7 @@ df_listado_indicadores = hojas["Listado_indicadores"]
 df_IDC = hojas["Valores_IDC"]
 df_indicadores_normalizados = hojas["Valores_Indicadores_Normalizado"]
 df_analisis_sensibilidad = hojas["Sensibilidad"]
+df_factores = hojas["Valor_normalizadoAgrupado"]
 
 
 if "Pronostico_IDC" in hojas:
@@ -126,7 +127,7 @@ del hojas, ruta_excel
 
 
 
-tab_idc, tab_clustering, tab_simulador, tab_info = st.tabs(["IDC", "Clustering", "Simulador", "Información"])
+tab_idc, tab_factores, tab_clustering, tab_calculadora, tab_info = st.tabs(["IDC", "Factores", "Clustering", "Calculadora", "Información"])
 
 
 # ========================
@@ -639,7 +640,7 @@ with left:
     
     vista_global = st.toggle(
         "Usar escala global (0–10)",
-        value=True,
+        value=False,
         help=(
             "Activa para ver el IDC en la escala completa 0–10. "
             "Desactiva para hacer zoom automático según los valores mostrados, "
@@ -763,89 +764,587 @@ with left:
 
 
 
+# ========================
+# Pestaña Factores
+# ========================
+NOMBRES_FACTORES = {
+    "Con_Habi": "Condiciones habilitantes",
+    "Cap_Hum": "Capital humano",
+    "Efi_Mer": "Eficiencia de los mercados",
+    "Eco_Inno": "Ecosistema innovador",
+}
+
+
+def build_factores_figure(
+    df_factores: pd.DataFrame,
+    dpto_sel: str,
+    factores: Optional[List[str]] = None
+) -> go.Figure:
+    """
+    Gráfico de factores para un departamento:
+    - Histórico: línea continua.
+    - Forecast (2 años): línea punteada + banda IC95.
+    - Hover unificado por año (x unified) con nombres extendidos.
+    """
+    if factores is None:
+        factores = ["Con_Habi", "Cap_Hum", "Efi_Mer", "Eco_Inno"]
+
+    # Filtrar departamento
+    df_dep = df_factores[df_factores["Departamento"] == dpto_sel].copy()
+    if df_dep.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            title=f"Sin datos de factores para {dpto_sel}",
+            template="plotly_white",
+        )
+        return fig
+
+    df_dep["Año"] = df_dep["Año IDC"].astype(int)
+
+    # Paleta y figura
+    palette = px.colors.qualitative.D3 + px.colors.qualitative.Bold + px.colors.qualitative.Dark24
+    fig = go.Figure()
+    color_map: dict[str, str] = {}
+
+    # Para construir el hover unificado
+    registros_hover: list[dict] = []
+
+    for i, factor_key in enumerate(factores):
+        # Serie histórica del factor
+        serie_hist = (
+            df_dep[["Año", factor_key]]
+            .dropna()
+            .sort_values("Año")
+        )
+        if serie_hist.empty:
+            continue
+
+        # Nombre “bonito” del factor
+        factor_name = NOMBRES_FACTORES.get(factor_key, factor_key)
+
+        # Color
+        color = palette[i % len(palette)]
+        color_map[factor_name] = color
+        color_map[f"{factor_name} (forecast)"] = color
+
+        r, g, b = _hex_to_rgb_tuple(color)
+
+        # =============================
+        # 1. Serie temporal + forecast
+        # =============================
+        idx = pd.to_datetime(serie_hist["Año"].astype(int).astype(str) + "-12-31")
+        s = pd.Series(serie_hist[factor_key].values, index=idx).asfreq("YE-DEC")
+
+        fh = 2  # horizonte 2 años (p.ej. 2025, 2026)
+        yhat, lo, hi, info = forecast_one_series(s, fh=fh)
+
+        # Histórico
+        registros = []
+        for t, val in s.items():
+            registros.append(
+                {
+                    "Año": t.year,
+                    "Tipo": "hist",
+                    "Valor": float(val) if pd.notna(val) else np.nan,
+                    "Lo95": np.nan,
+                    "Hi95": np.nan,
+                    "FactorKey": factor_key,
+                }
+            )
+
+        # Forecast
+        if len(yhat) > 0:
+            last_year = s.index[-1].year
+            future_years = [last_year + j for j in range(1, len(yhat) + 1)]
+            for j, ypred in enumerate(yhat):
+                registros.append(
+                    {
+                        "Año": future_years[j],
+                        "Tipo": "forecast",
+                        "Valor": float(ypred),
+                        "Lo95": float(lo[j]) if pd.notna(lo[j]) else np.nan,
+                        "Hi95": float(hi[j]) if pd.notna(hi[j]) else np.nan,
+                        "FactorKey": factor_key,
+                    }
+                )
+
+        df_plot = pd.DataFrame(registros).sort_values("Año")
+
+        # Acumular para hover global
+        registros_hover.extend(df_plot.to_dict(orient="records"))
+
+        sub_hist = df_plot[df_plot["Tipo"] == "hist"]
+        sub_fc = df_plot[df_plot["Tipo"] == "forecast"]
+
+        # Último histórico y primer forecast (para el conector)
+        last_hist_year = None
+        last_hist_val = None
+        first_fc_year = None
+        first_fc_val = None
+
+        if not sub_hist.empty:
+            last_row_hist = sub_hist.iloc[-1]
+            last_hist_year = int(last_row_hist["Año"])
+            last_hist_val = float(last_row_hist["Valor"])
+
+        if not sub_fc.empty:
+            first_row_fc = sub_fc.iloc[0]
+            first_fc_year = int(first_row_fc["Año"])
+            first_fc_val = float(first_row_fc["Valor"])
+
+        # =============================
+        # 2. Bandas IC95 del forecast
+        # =============================
+        fc = sub_fc.dropna(subset=["Lo95", "Hi95"])
+        if not fc.empty:
+            x_hi = list(fc["Año"])
+            y_hi = list(fc["Hi95"])
+            x_lo = list(fc["Año"])
+            y_lo = list(fc["Lo95"])
+
+            if (last_hist_year is not None) and (last_hist_val is not None):
+                x_poly = [last_hist_year] + x_hi + x_lo[::-1] + [last_hist_year]
+                y_poly = [last_hist_val] + y_hi + y_lo[::-1] + [last_hist_val]
+            else:
+                x_poly = x_hi + x_lo[::-1]
+                y_poly = y_hi + y_lo[::-1]
+
+            # Relleno
+            fig.add_trace(
+                go.Scatter(
+                    x=x_poly,
+                    y=y_poly,
+                    fill="toself",
+                    fillcolor=f"rgba({r},{g},{b},0.12)",
+                    line=dict(width=0),
+                    legendgroup=factor_name,
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
+            # Bordes punteados
+            fig.add_trace(
+                go.Scatter(
+                    x=fc["Año"],
+                    y=fc["Hi95"],
+                    mode="lines",
+                    line=dict(color=f"rgba({r},{g},{b},0.55)", width=1, dash="dot"),
+                    legendgroup=factor_name,
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=fc["Año"],
+                    y=fc["Lo95"],
+                    mode="lines",
+                    line=dict(color=f"rgba({r},{g},{b},0.55)", width=1, dash="dot"),
+                    legendgroup=factor_name,
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
+
+        # =============================
+        # 3. Líneas hist / forecast
+        # =============================
+        # Histórico: línea continua
+        if not sub_hist.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=sub_hist["Año"],
+                    y=sub_hist["Valor"],
+                    mode="lines+markers",
+                    name=factor_name,
+                    legendgroup=factor_name,
+                    marker=dict(symbol="circle", size=7),
+                    line=dict(color=color, width=2.5),
+                    hoverinfo="skip",
+                    showlegend=True,
+                )
+            )
+
+        # Forecast: línea punteada
+        if not sub_fc.empty:
+            serie_fc_name = f"{factor_name} (forecast)"
+            fig.add_trace(
+                go.Scatter(
+                    x=sub_fc["Año"],
+                    y=sub_fc["Valor"],
+                    mode="lines+markers",
+                    name=serie_fc_name,
+                    legendgroup=factor_name,
+                    marker=dict(symbol="circle-open", size=8),
+                    line=dict(color=color, width=2.5, dash="dash"),
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
+
+            # Conector hist -> forecast
+            if (last_hist_year is not None) and (first_fc_year is not None):
+                fig.add_trace(
+                    go.Scatter(
+                        x=[last_hist_year, first_fc_year],
+                        y=[last_hist_val, first_fc_val],
+                        mode="lines",
+                        line=dict(color=color, width=2.5, dash="dash"),
+                        legendgroup=factor_name,
+                        hoverinfo="skip",
+                        showlegend=False,
+                    )
+                )
+
+    # =============================
+    # 4. Hover unificado por año
+    # =============================
+    if registros_hover:
+        base_all = pd.DataFrame(registros_hover)
+
+        def nombre_serie_row(row) -> str:
+            fname = NOMBRES_FACTORES.get(row["FactorKey"], row["FactorKey"])
+            return f"{fname} (forecast)" if row["Tipo"] == "forecast" else fname
+
+        base_all["Serie"] = base_all.apply(nombre_serie_row, axis=1)
+        base_all_sorted = base_all.sort_values(["Año", "Valor"], ascending=[True, False])
+
+        def build_block(grp: pd.DataFrame) -> str:
+            filas = []
+            for _, r in grp.iterrows():
+                serie = r["Serie"]
+                val = r["Valor"]
+                color = color_map.get(serie, "black")
+                filas.append(
+                    f'<span style="color:{color};font-weight:bold;">● {serie}</span>: {val:.3f}'
+                )
+            return "<br>".join(filas)
+
+        hover_text_dict = base_all_sorted.groupby("Año").apply(build_block).to_dict()
+        anos_unicos = sorted(base_all["Año"].unique())
+        custom_hover = [hover_text_dict.get(a, "") for a in anos_unicos]
+
+        fig.add_trace(
+            go.Scatter(
+                x=anos_unicos,
+                y=[0] * len(anos_unicos),
+                mode="markers",
+                marker=dict(size=8, opacity=0),
+                line=dict(width=0),
+                showlegend=False,
+                name="__hover_factores__",
+                customdata=custom_hover,
+                hovertemplate="%{customdata}<extra></extra>",
+                hoverlabel=dict(namelength=-1),
+            )
+        )
+
+    # =============================
+    # 5. Layout
+    # =============================
+    fig.update_layout(
+        title=f"Evolución y pronóstico de factores — {dpto_sel}",
+        xaxis_title="Año",
+        yaxis_title="Valor",
+        legend_title="Factores",
+        hovermode="x unified",
+        hoverdistance=50,
+        hoverlabel=dict(namelength=-1),
+        template="plotly_white",
+        margin=dict(l=10, r=10, t=50, b=10),
+        height=670,
+    )
+    fig.update_xaxes(type="linear", tickmode="linear", dtick=1)
+
+    return fig
+
+
+with tab_factores:
+    st.subheader("Evolución de factores del IDC")
+
+    # Selector de Departamento
+    dptos_factores = sorted(df_factores["Departamento"].dropna().unique())
+    if "Risaralda" in dptos_factores:
+        idx_default = dptos_factores.index("Risaralda")
+    else:
+        idx_default = 0
+
+    dpto_fact_sel = st.selectbox(
+        "Selecciona el departamento:",
+        dptos_factores,
+        index=idx_default,
+        key="dpto_factores_sel",
+    )
+
+    # Selector de factores con nombres extendidos
+    factores_disponibles = ["Con_Habi", "Cap_Hum", "Efi_Mer", "Eco_Inno"]
+
+    factores_sel = st.multiselect(
+        "Selecciona los factores a mostrar:",
+        options=factores_disponibles,
+        format_func=lambda x: NOMBRES_FACTORES.get(x, x),
+        default=factores_disponibles,
+        key="factores_sel",
+    )
+
+    if not factores_sel:
+        st.info("Selecciona al menos un factor para visualizar el gráfico.")
+    else:
+
+        # ---------------------------
+        # Switch de escala
+        # ---------------------------
+        vista_global_f = st.toggle(
+            "Usar escala global (0–10)",
+            value=False,
+            help=(
+                "Activa para ver los factores en la escala completa 0–10. "
+                "Desactiva para aplicar zoom automático según los valores mostrados."
+            )
+        )
+
+        # ---------------------------
+        # Construir gráfica
+        # ---------------------------
+        fig_factores = build_factores_figure(df_factores, dpto_fact_sel, factores_sel)
+
+        # ---------------------------
+        # Ajuste de escala
+        # ---------------------------
+        if vista_global_f:
+            # Escala fija 0–10
+            fig_factores.update_yaxes(range=[0, 10])
+
+        else:
+            # Zoom basado en los datos seleccionados
+            df_dep = df_factores[df_factores["Departamento"] == dpto_fact_sel].copy()
+            df_dep["Año"] = df_dep["Año IDC"].astype(int)
+
+            df_long = df_dep.melt(
+                id_vars=["Año", "Departamento"],
+                value_vars=factores_sel,
+                var_name="Factor",
+                value_name="Valor",
+            ).dropna(subset=["Valor"])
+
+            if not df_long.empty:
+                raw_min = float(df_long["Valor"].min())
+                raw_max = float(df_long["Valor"].max())
+            else:
+                raw_min, raw_max = 0.0, 10.0
+
+            y_min = round_down_to_half(raw_min)
+            y_max = round_up_to_half(raw_max)
+
+            if y_min == y_max:
+                y_min = max(0.0, y_min - 0.5)
+                y_max = y_max + 0.5
+
+            fig_factores.update_yaxes(range=[y_min, y_max])
+
+        # Render final
+        st.plotly_chart(fig_factores, width="stretch")
+
 
 # ========================
 # Pestaña Simulacion
 # ========================
-with tab_simulador:
-    st.subheader("Simulador de indicadores importantes")
-    st.write("Ajusta los valores de las variables independientes y presiona **Recalcular resultados** para ver el nuevo valor.")
+FACTORES_PILARES = OrderedDict({
+    "Condiciones habilitantes": [
+        ("P1", "1. Instituciones"),
+        ("P2", "2. Infraestructura"),
+        ("P3", "3. Adopción TIC"),
+        ("P4", "4. Sostenibilidad ambiental"),
+    ],
+    "Capital humano": [
+        ("P5", "5. Salud"),
+        ("P6", "6. Educación básica y media"),
+        ("P7", "7. Educación superior y formación para el trabajo"),
+    ],
+    "Eficiencia de los mercados": [
+        ("P8", "8. Entorno para los negocios"),
+        ("P9", "9. Mercado laboral"),
+        ("P10", "10. Sistema financiero"),
+        ("P11", "11. Tamaño del mercado"),
+    ],
+    "Ecosistema innovador": [
+        ("P12", "12. Sofisticación y diversificación"),
+        ("P13", "13. Innovación"),
+    ],
+})
 
-    # from src.scenary_simulator import calcular_variable
+def chip_promedio(label: str, value: float | None) -> None:
+    """
+    Renderiza un 'chip' tipo botón con el texto Promedio y el valor.
+    Si value es None, muestra '--'.
+    """
+    if value is None:
+        txt_val = "--"
+    else:
+        txt_val = f"{value:.2f}"
 
-    valores_iniciales = {
-        "INS-2-1": {"Ingresos_tributarios": 200, "Ingresos_no_tributarios": 50, "Transferencias": 30, "Ingresos_totales": 400},
-        "NEG-2-2": {"Sociedades_empresariales": 1000, "Poblacion": 500000},
-        "TIC-1-3": {"Hogares_con_computador": 60000, "Total_hogares": 100000},
-        "TIC-1-1": {"Accesos_fijos_internet": 80000, "Poblacion": 500000},
-        "EDU-1-3": {"Estudiantes_matriculados": 30000, "Poblacion_en_edad": 40000},
-        "INN-2-4": {"Registro_marca_t2": 10, "Registro_marca_t1": 12, "Registro_marca_t": 15, "Poblacion": 500000},
-        "SAL-3-3": {"Especializacion": 200, "Poblacion": 500000},
-        "SAL-1-3": {"Nacidos_con_controles": 4800, "Total_nacimientos": 5000},
-        "TIC-1-4": {"Poblacion_usa_internet": 450000, "Total_poblacion": 500000},
-        "EDU-2-1": {"P_Escritura": 60, "P_Lectura": 65, "P_Razonamiento": 70},
-    }
+    st.markdown(
+        f"""
+        <div style="
+            text-align:center;
+            background-color:#008b5a;
+            color:white;
+            padding:0.25rem 0.75rem;
+            border-radius:999px;
+            font-weight:bold;
+            border:1px solid #006f46;
+            font-size:0.9rem;
+        ">
+            {label}<br>{txt_val}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    for _, row in tabla_final.iterrows():
-        codigo = row["Indicador"]
-        nombre = row["Nombre"]
-        valores_vars = valores_iniciales.get(codigo, {})
+with tab_calculadora:
+    st.subheader("Calculadora rápida del IDC (0–10)")
 
-        with st.expander(f"{nombre} ({codigo})", expanded=False):
-            st.caption("Introduce nuevos valores y luego presiona el botón para actualizar el cálculo.")
+    col_left, col_right = st.columns([2, 1], gap="large")
 
-            try:
-                valor_inicial = df_indicadores_normalizados.loc[
-                    df_indicadores_normalizados["Indicador"] == codigo, "Valor"
-                ].values[0]
-            except:
-                valor_inicial = calcular_variable(codigo, valores_iniciales[codigo])
+    # -----------------------------
+    # COLUMNA IZQUIERDA: FACTORES
+    # -----------------------------
+    with col_left:
+        for i, (nombre_factor, pilares) in enumerate(FACTORES_PILARES.items(), start=1):
+            key_factor = f"prom_factor_{i}"
+            if key_factor not in st.session_state:
+                st.session_state[key_factor] = None
 
-            st.info(f"**Valor actual del indicador:** {valor_inicial:.4f}")
+            with st.form(f"form_factor_{i}"):
 
-            # Inputs con session_state
-            for var, val in valores_vars.items():
-                st.number_input(
-                    f"{var}",
-                    value=float(val),
-                    key=f"{codigo}_{var}",
-                )
+                # Encabezado (título + chip) en dos columnas
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    st.markdown(f"**Factor {i}. {nombre_factor}**")
 
-            # Botón de recalcular
-            if st.button(f"Recalcular {codigo}"):
-                valores = {var: st.session_state[f"{codigo}_{var}"] for var in valores_vars}
-                resultado = calcular_variable(codigo, valores)
-                if resultado is not None:
-                    st.success(f"**Nuevo valor calculado:** {resultado:.4f}")
-
-                    df_mod = df_indicadores_normalizados.copy()
-                    df_mod.loc[df_mod["Departamento"] == "Risaralda", codigo] = resultado
-
-                    idc_actual = calcular_idc(df_indicadores_normalizados, "Risaralda")
-                    idc_nuevo = calcular_idc(df_mod, "Risaralda")
-                    delta = idc_nuevo - idc_actual
-
-                    st.metric(
-                        label="Impacto sobre el IDC de Risaralda",
-                        value=f"{idc_nuevo:.3f}",
-                        delta=f"{delta:+.3f}"
+                # --- Inputs de los pilares (sólo recogen valores) ---
+                for codigo, nombre_pilar in pilares:
+                    st.text_input(
+                        nombre_pilar,
+                        placeholder="Ingresa un valor (0–10)",
+                        key=f"pilar_{codigo}",
                     )
 
+                # Botón que dispara la validación y el cálculo
+                submitted = st.form_submit_button("Calcular promedio del factor")
 
-    # for _, row in tabla_final.iterrows():
-    #     codigo = row["Indicador"]
-    #     nombre = row["Nombre"]
+                # ---- Lógica de validación y cálculo ----
+                prom_factor = st.session_state[key_factor]  # valor previo por defecto
 
-    #     with st.expander(f"{nombre} ({codigo})", expanded=False):
-    #         st.caption("Ajusta los valores para observar el resultado recalculado.")
-    #         valores = {}
-    #         for var, val in valores_iniciales.get(codigo, {}).items():
-    #             valores[var] = st.number_input(f"{var}", value=float(val), key=f"{codigo}_{var}")
+                if submitted:
+                    valores_factor: list[float] = []
+                    errores_factor: list[str] = []
 
-    #         if valores:
-    #             resultado = calcular_variable(codigo, valores)
-    #             if resultado is not None:
-    #                 st.success(f"**Nuevo valor calculado:** {resultado:.4f}")
+                    for codigo, nombre_pilar in pilares:
+                        txt = str(st.session_state.get(f"pilar_{codigo}", "")).strip()
+
+                        if txt == "":
+                            errores_factor.append(f"Falta valor en {nombre_pilar}.")
+                            continue
+
+                        try:
+                            val = float(txt.replace(",", "."))
+                            if not (0.0 <= val <= 10.0):
+                                errores_factor.append(
+                                    f"El valor de {nombre_pilar} debe estar entre 0 y 10."
+                                )
+                            else:
+                                valores_factor.append(val)
+                        except ValueError:
+                            errores_factor.append(
+                                f"El valor de {nombre_pilar} debe ser numérico."
+                            )
+
+                    if errores_factor or len(valores_factor) < len(pilares):
+                        prom_factor = None
+                        st.session_state[key_factor] = None
+
+                        for msg in errores_factor:
+                            st.error(msg)
+                        st.info(
+                            "Debes diligenciar correctamente todos los pilares de este "
+                            "factor para poder calcular su promedio."
+                        )
+                    else:
+                        prom_factor = sum(valores_factor) / len(valores_factor)
+                        st.session_state[key_factor] = prom_factor
+                        st.success(f"Promedio del factor calculado: {prom_factor:.2f}")
+
+                # --- Ahora sí dibujamos el chip con el valor actual ---
+                with c2:
+                    chip_promedio("Promedio", prom_factor)
+
+            st.markdown("&nbsp;")  # espacio entre factores
+
+    # -----------------------------
+    # COLUMNA DERECHA: IDC calculado
+    # -----------------------------
+    with col_right:
+        st.markdown("### ")
+
+        promedios_factores: list[float | None] = []
+        for i, _ in enumerate(FACTORES_PILARES.keys(), start=1):
+            key_factor = f"prom_factor_{i}"
+            promedios_factores.append(st.session_state.get(key_factor, None))
+
+        # IDC sólo cuando TODOS los factores tienen promedio
+        if all(p is not None for p in promedios_factores):
+            idc_calc = sum(promedios_factores) / len(promedios_factores)
+
+            st.markdown(
+                """
+                <div style="font-size:2.5rem; font-weight:bold; margin-top:1rem;">
+                    IDC calculado
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"""
+                <div style="
+                    font-size:4rem;
+                    font-weight:bold;
+                    color:#008b5a;
+                    margin-top:0rem;
+                ">
+                    {idc_calc:.2f}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """
+                <div style="font-size:1.2rem; font-weight:bold; margin-top:1rem;">
+                    IDC calculado
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                """
+                <div style="
+                    font-size:4rem;
+                    font-weight:bold;
+                    color:#cccccc;
+                    margin-top:0.5rem;
+                ">
+                    --
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.warning(
+                "Para calcular el IDC primero debes calcular el promedio de todos "
+                "los factores usando el botón de cada uno."
+            )
+
+
 
 # ========================
 # Pestaña Información
